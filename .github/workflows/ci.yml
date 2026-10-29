@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Conn3x
+        env: &gh
+          GH_TOKEN: ${{ github.token }}
+        run: &install |
+          tag=$(gh release view -R conn3xorg/conn3x --json tagName -q .tagName)
+          file="conn3x_${tag#v}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -sSfLO "https://github.com/conn3xorg/conn3x/releases/download/$tag/$file"
+          curl -sSfLO "https://github.com/conn3xorg/conn3x/releases/download/$tag/checksums.txt"
+          grep " $file\$" checksums.txt | sha256sum -c -
+          mkdir -p bin && tar -xzf "$file" -C bin conn3x
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: conn3x version
+      - run: conn3x fmt -check -recursive
+      - name: Validate
+        run: conn3x init -backend=false && conn3x validate
+      - name: Validate the example
+        working-directory: examples/local
+        run: conn3x init -backend=false && conn3x validate
+
+  e2e:
+    needs: validate
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [rocky10, fedora45, ubuntu2404, debian13]
+    name: e2e (${{ matrix.distro }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The test host images live in the Conn3x repo.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: conn3xorg/conn3x
+          ref: main
+          path: conn3x
+          persist-credentials: false
+          sparse-checkout: test/images
+      - name: Install Conn3x
+        env: *gh
+        run: *install
+      - name: Start the ${{ matrix.distro }} host
+        working-directory: examples/local
+        env:
+          CONTAINERFILE: ${{ github.workspace }}/conn3x/test/images/${{ matrix.distro }}/Containerfile
+          # The host container is privileged, so the haproxy unit can set up
+          # its mount namespace.
+          PODMAN: sudo podman
+        run: ./up.sh
+      - name: Apply, then plan again with no changes
+        working-directory: examples/local
+        run: |
+          conn3x init
+          conn3x apply -auto-approve
+          conn3x plan -detailed-exitcode
+          sudo podman exec circuit-haproxy systemctl is-active haproxy
+      # Starts the two web servers as transient units, checks the frontend
+      # answers from both, then stops one and checks the health check takes
+      # it out while every request still succeeds.
+      - name: Check traffic is balanced, and a stopped server is taken out
+        run: |
+          sudo podman exec -i circuit-haproxy sh -eu <<'EOF'
+          systemd-run --unit web1 -p WorkingDirectory=/srv/web1 python3 -m http.server --bind 127.0.0.1 9001
+          systemd-run --unit web2 -p WorkingDirectory=/srv/web2 python3 -m http.server --bind 127.0.0.1 9002
+          sleep 5
+          seen=$(for _ in $(seq 8); do curl -sSf localhost:8080/; done | sort -u)
+          echo "$seen"
+          echo "$seen" | grep -qx 'Hello from web1.'
+          echo "$seen" | grep -qx 'Hello from web2.'
+          systemctl stop web2
+          sleep 8
+          seen=$(for _ in $(seq 8); do curl -sSf localhost:8080/; done | sort -u)
+          echo "$seen"
+          [ "$seen" = 'Hello from web1.' ]
+          [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8404/stats)" = 401 ]
+          curl -sSf -u admin:example-only 'localhost:8404/stats;csv' | grep '^web,web2,' | grep -q DOWN
+          EOF
+      - name: Clean up
+        if: always()
+        working-directory: examples/local
+        env:
+          PODMAN: sudo podman
+        run: ./down.sh

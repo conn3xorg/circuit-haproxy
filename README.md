@@ -1,5 +1,7 @@
 # circuit-haproxy
 
+[![Conn3x grade](https://conn3x.org/circuits/haproxy/grade.svg)](https://conn3x.org/circuits/haproxy/grade)
+
 A Conn3x circuit that installs HAProxy from the distribution and writes its config from a map of frontends and backends. You describe what listens where and which servers sit behind it; the circuit turns that into `/etc/haproxy/haproxy.cfg`, checks it with `haproxy -c` before it goes live, and reloads HAProxy without dropping a connection.
 
 That check is the part you'd otherwise script yourself. A typo in a server line, or a certificate path that doesn't exist yet, stops the apply with HAProxy's own error message, and the running HAProxy keeps the config it had.

@@ -12,7 +12,7 @@ It runs on Debian, Ubuntu, Fedora and Rocky Linux. On Fedora and Rocky Linux it 
 
 ```hcl
 module "haproxy" {
-  source = "github.com/conn3xorg/circuit-haproxy?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-haproxy?ref=v0.1.1"
 
   hosts                = { lb1 = "203.0.113.10" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
